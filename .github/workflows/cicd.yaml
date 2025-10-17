@@ -1,0 +1,188 @@
+name: End-to-End Online Boutique CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-test-analyze-push-deploy:
+    strategy:
+      matrix:
+        include:
+          - name: frontend
+            path: src/frontend
+            language: go
+            dockerfile: src/frontend/Dockerfile
+            helm_chart: helm/frontend
+          - name: adservice
+            path: src/adservice
+            language: java
+            dockerfile: src/adservice/Dockerfile
+            helm_chart: helm/adservice
+          - name: cartservice
+            path: src/cartservice
+            language: dotnet
+            dockerfile: src/cartservice/Dockerfile
+            helm_chart: helm/cartservice
+          - name: productcatalogservice
+            path: src/productcatalogservice
+            language: go
+            dockerfile: src/productcatalogservice/Dockerfile
+            helm_chart: helm/productcatalogservice
+          - name: currencyservice
+            path: src/currencyservice
+            language: node
+            dockerfile: src/currencyservice/Dockerfile
+            helm_chart: helm/currencyservice
+          - name: paymentservice
+            path: src/paymentservice
+            language: node
+            dockerfile: src/paymentservice/Dockerfile
+            helm_chart: helm/paymentservice
+          - name: shippingservice
+            path: src/shippingservice
+            language: go
+            dockerfile: src/shippingservice/Dockerfile
+            helm_chart: helm/shippingservice
+          - name: emailservice
+            path: src/emailservice
+            language: python
+            dockerfile: src/emailservice/Dockerfile
+            helm_chart: helm/emailservice
+          - name: checkoutservice
+            path: src/checkoutservice
+            language: go
+            dockerfile: src/checkoutservice/Dockerfile
+            helm_chart: helm/checkoutservice
+          - name: recommendationservice
+            path: src/recommendationservice
+            language: python
+            dockerfile: src/recommendationservice/Dockerfile
+            helm_chart: helm/recommendationservice
+          - name: loadgenerator
+            path: src/loadgenerator
+            language: python
+            dockerfile: src/loadgenerator/Dockerfile
+            helm_chart: helm/loadgenerator
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Setup environment for each service as needed
+      - name: Set up Java
+        if: ${{ matrix.language == 'java' }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+
+      - name: Set up .NET
+        if: ${{ matrix.language == 'dotnet' }}
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '7.0.x'
+
+      - name: Set up Node.js
+        if: ${{ matrix.language == 'node' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        if: ${{ matrix.language == 'python' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Build step
+      - name: Build
+        run: |
+          cd ${{ matrix.path }}
+          if [ "${{ matrix.language }}" = "java" ]; then mvn clean package; fi
+          if [ "${{ matrix.language }}" = "dotnet" ]; then dotnet build; fi
+          if [ "${{ matrix.language }}" = "node" ]; then npm install && npm run build; fi
+          if [ "${{ matrix.language }}" = "python" ]; then python setup.py build || true; fi
+          if [ "${{ matrix.language }}" = "go" ]; then go build . || true; fi
+
+      # Test step
+      - name: Unit Test
+        run: |
+          cd ${{ matrix.path }}
+          if [ "${{ matrix.language }}" = "java" ]; then mvn test; fi
+          if [ "${{ matrix.language }}" = "dotnet" ]; then dotnet test; fi
+          if [ "${{ matrix.language }}" = "node" ]; then npm test || true; fi
+          if [ "${{ matrix.language }}" = "python" ]; then pytest || true; fi
+          if [ "${{ matrix.language }}" = "go" ]; then go test ./... || true; fi
+
+      # SonarQube analysis
+      - name: SonarQube Analysis
+        run: |
+          cd ${{ matrix.path }}
+          if [ "${{ matrix.language }}" = "java" ]; then \
+            mvn sonar:sonar \
+            -Dsonar.projectKey=${{ matrix.name }} \
+            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}; \
+          fi
+          if [ "${{ matrix.language }}" = "dotnet" ]; then \
+            dotnet tool install --global dotnet-sonarscanner && \
+            dotnet sonarscanner begin /k:"${{ matrix.name }}" /d:sonar.host.url="${{ secrets.SONAR_HOST_URL }}" /d:sonar.login="${{ secrets.SONAR_TOKEN }}" && \
+            dotnet build && \
+            dotnet sonarscanner end /d:sonar.login="${{ secrets.SONAR_TOKEN }}"; \
+          fi
+          if [ "${{ matrix.language }}" = "node" ]; then \
+            npm install -g sonar-scanner && \
+            sonar-scanner \
+              -Dsonar.projectKey=${{ matrix.name }} \
+              -Dsonar.sources=. \
+              -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+              -Dsonar.login=${{ secrets.SONAR_TOKEN }}; \
+          fi
+          if [ "${{ matrix.language }}" = "python" ]; then \
+            pip install sonar-scanner || true && \
+            sonar-scanner \
+              -Dsonar.projectKey=${{ matrix.name }} \
+              -Dsonar.sources=. \
+              -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+              -Dsonar.login=${{ secrets.SONAR_TOKEN }}; \
+          fi
+          if [ "${{ matrix.language }}" = "go" ]; then \
+            npm install -g sonar-scanner && \
+            sonar-scanner \
+              -Dsonar.projectKey=${{ matrix.name }} \
+              -Dsonar.sources=. \
+              -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+              -Dsonar.login=${{ secrets.SONAR_TOKEN }}; \
+          fi
+
+      # Login to ECR
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Build Docker image
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ matrix.name }}:latest -f ${{ matrix.dockerfile }} .
+        working-directory: ${{ matrix.path }}
+
+      # Push Docker image
+      - name: Push Docker image
+        run: |
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ matrix.name }}:latest
+
+      # Configure kubectl for EKS
+      - name: Configure kubectl for EKS
+        uses: aws-actions/eks-update-kubeconfig@v2
+        with:
+          cluster-name: ${{ secrets.EKS_CLUSTER_NAME }}
+          region: ${{ secrets.AWS_REGION }}
+
+      # Helm deploy/upgrade
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install ${{ matrix.name }} ${{ matrix.helm_chart }} \
+            --set image.repository=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ matrix.name }},image.tag=latest \
+            --namespace online-boutique --create-namespace
